@@ -94,7 +94,9 @@ repositório e a essa permissão: dispara workflow, e não lê nem escreve conte
 
 ### O que o runner precisa ter
 
-`docker`, `git`, `curl`, `node`, `tar` e `sha256sum`. Os runners do GitHub têm todos.
+Linux em `amd64`, com `docker`, `git`, `curl`, `node`, `tar` e `sha256sum`. Os runners
+do GitHub têm todos. A varredura usa um pacote fixado por soma, que só existe aqui
+para `amd64`: noutra arquitetura o passo recusa, com o motivo.
 
 ## Desenvolver
 

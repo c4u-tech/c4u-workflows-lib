@@ -47,11 +47,23 @@ case "$url" in
     fi
     ;;
   *)
+    touch "$FIXTURES/downloaded"
     cp "$FIXTURES/download" "$out"
     ;;
 esac
 MOCK
 printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$tmp/bin/sleep"
+# uname de mentira: os testes rodam em qualquer máquina, e a arquitetura é a do
+# arquivo $FIXTURES/machine, ou x86_64.
+cat >"$tmp/bin/uname" <<'MOCK'
+#!/usr/bin/env bash
+if [ "$1" = "-m" ]; then
+  if [ -f "$FIXTURES/machine" ]; then cat "$FIXTURES/machine"; else echo x86_64; fi
+else
+  echo Linux
+fi
+MOCK
+chmod +x "$tmp/bin/uname"
 chmod +x "$tmp/bin/curl" "$tmp/bin/sleep"
 
 expect() {
@@ -105,6 +117,15 @@ expect 1 "usuário 0:0" "$check_image" "0:0"
 expect 1 "usuário 00" "$check_image" "00"
 
 echo "== install-grype"
+# A soma fixada é a do pacote amd64: noutra arquitetura, recusa antes de baixar.
+fixtures
+echo aarch64 >"$tmp/fixtures/machine"
+echo "não é o grype" >"$tmp/fixtures/download"
+expect 2 "arquitetura que não é amd64" "$install_grype" "$tmp/grype"
+if [ -e "$tmp/fixtures/downloaded" ]; then
+  echo "FALHOU: baixou o pacote mesmo sem servir à arquitetura"
+  failures=$((failures + 1))
+fi
 fixtures
 echo "não é o grype" >"$tmp/fixtures/download"
 expect 1 "soma diferente da fixada" "$install_grype" "$tmp/grype"

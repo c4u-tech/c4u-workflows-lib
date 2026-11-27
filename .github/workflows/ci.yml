@@ -21,7 +21,11 @@ jobs:
       - run: shellcheck scripts/*.sh tests/run.sh
 
   # O workflow inteiro sobre um Dockerfile bom, sem publicar e sem pedir implantação.
+  # Não roda em PR vindo de fork: o GitHub não dá a um fork o token de identidade
+  # (id-token) que o workflow lê para achar a própria versão. Os testes e o
+  # shellcheck, acima, rodam em todo PR, e este job roda de novo no push ao dev.
   build:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
       id-token: write
