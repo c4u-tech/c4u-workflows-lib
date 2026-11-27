@@ -108,7 +108,7 @@ shellcheck scripts/*.sh tests/run.sh
 Os testes não usam Docker nem rede. A CI roda os dois e mais o `build-image.yml`
 inteiro sobre `tests/dockerfiles/good`, sem publicar.
 
-Uma versão nova é uma etiqueta `vX.Y.Z` sobre um commit do `main`.
+Uma versão nova é uma etiqueta `vX.Y.Z` sobre um commit do `dev`.
 
 ## Licença
 
