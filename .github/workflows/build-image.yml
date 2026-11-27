@@ -1,0 +1,250 @@
+name: build-image
+
+# Constrói a imagem de um serviço, confere, publica por digest e pede a implantação
+# ao repositório de estado. É chamado com `uses:` pelo repositório do produto, uma
+# vez por serviço.
+#
+# Quem chama dá as permissões do job: contents: read, packages: write e
+# id-token: write. A última serve só para este workflow descobrir em que commit ele
+# mesmo está, e buscar os próprios scripts nesse commit.
+#
+# Só duas ações, as duas do GitHub e fixadas por commit. O resto são comandos do
+# Docker, curl e um binário conferido por soma. Nenhuma entrada é interpolada num
+# comando: todas chegam por variável de ambiente e são conferidas antes do uso.
+on:
+  workflow_call:
+    inputs:
+      context:
+        description: Diretório de contexto da construção, relativo à raiz do repositório
+        type: string
+        default: .
+      dockerfile:
+        description: Caminho do Dockerfile. Vazio, é o Dockerfile do contexto
+        type: string
+        default: ''
+      image:
+        description: Nome da imagem, com o registro e sem marca, como ghcr.io/<dono>/<nome>
+        type: string
+        required: true
+      tag:
+        description: Marca da imagem publicada. A implantação usa o digest, e não a marca
+        type: string
+        required: true
+      build_args:
+        description: Argumentos de construção, um NOME=valor por linha
+        type: string
+        default: ''
+      service:
+        description: Nome do serviço no repositório de estado
+        type: string
+        default: ''
+      env:
+        description: Ambiente da implantação, stg ou prd
+        type: string
+        default: stg
+      state_repository:
+        description: Repositório de estado, como <dono>/<nome>
+        type: string
+        default: ''
+      runner:
+        description: Runner do job. Um rótulo, ou uma lista JSON de rótulos
+        type: string
+        default: ubuntu-latest
+      push:
+        description: Publicar a imagem. Desligado, só constrói e confere
+        type: boolean
+        default: true
+      deploy:
+        description: Pedir a implantação depois de publicar
+        type: boolean
+        default: true
+      wait:
+        description: Esperar a implantação e terminar com o resultado dela
+        type: boolean
+        default: true
+      deploy_request_app_client_id:
+        description: Client ID do aplicativo do GitHub que pede a implantação
+        type: string
+        default: ''
+    secrets:
+      deploy_request_app_private_key:
+        description: Chave privada do aplicativo do GitHub que pede a implantação
+        required: false
+    outputs:
+      digest:
+        description: Digest da imagem publicada. Vazio se não publicou
+        value: ${{ jobs.build.outputs.digest }}
+
+jobs:
+  build:
+    runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
+    timeout-minutes: 75
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    env:
+      CONTEXT: ${{ inputs.context }}
+      DOCKERFILE: ${{ inputs.dockerfile }}
+      IMAGE: ${{ inputs.image }}
+      TAG: ${{ inputs.tag }}
+      BUILD_ARGS: ${{ inputs.build_args }}
+      SERVICE: ${{ inputs.service }}
+      ENVIRONMENT: ${{ inputs.env }}
+      STATE_REPOSITORY: ${{ inputs.state_repository }}
+    steps:
+      - name: conferir as entradas
+        id: inputs
+        run: |
+          refuse() {
+            echo "::error::$1"
+            exit 2
+          }
+          path='^[A-Za-z0-9._][A-Za-z0-9._/-]*$'
+          [[ "$CONTEXT" =~ $path && "$CONTEXT" != *..* ]] || refuse "context inválido"
+          dockerfile="${DOCKERFILE:-$CONTEXT/Dockerfile}"
+          [[ "$dockerfile" =~ $path && "$dockerfile" != *..* ]] || refuse "dockerfile inválido"
+          [[ "$IMAGE" =~ ^[a-z0-9][a-z0-9.-]*(:[0-9]+)?(/[a-z0-9][a-z0-9._-]*)+$ ]] || refuse "image inválida: registro/dono/nome, em minúsculas e sem marca"
+          [[ "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || refuse "tag inválida"
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || refuse "build_args: cada linha é NOME=valor"
+          done <<<"$BUILD_ARGS"
+          {
+            echo "dockerfile=$dockerfile"
+            echo "registry=${IMAGE%%/*}"
+          } >>"$GITHUB_OUTPUT"
+
+      # Os scripts moram no repositório deste workflow, e não no de quem chama. O
+      # commit em que este workflow está vem do token OIDC do job, que o GitHub
+      # assina: nenhuma entrada de quem chama escolhe de onde os scripts vêm.
+      - name: descobrir o commit deste workflow
+        id: self
+        run: |
+          token="$(curl -fsS \
+            -H @<(printf 'Authorization: Bearer %s' "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:?falta a permissão id-token: write no job que chama}") \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=build-image")"
+          claims="$(node -e '
+            const token = JSON.parse(require("fs").readFileSync(0, "utf8")).value;
+            const claims = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8"));
+            console.log(claims.job_workflow_ref.split("/").slice(0, 2).join("/"));
+            console.log(claims.job_workflow_sha);
+          ' <<<"$token")"
+          repository="$(sed -n 1p <<<"$claims")"
+          sha="$(sed -n 2p <<<"$claims")"
+          [[ "$repository" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*/[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || { echo "::error::repositório do workflow ilegível"; exit 1; }
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::commit do workflow ilegível"; exit 1; }
+          {
+            echo "repository=$repository"
+            echo "sha=$sha"
+          } >>"$GITHUB_OUTPUT"
+
+      # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ steps.self.outputs.repository }}
+          ref: ${{ steps.self.outputs.sha }}
+          path: .build-image
+          persist-credentials: false
+
+      # Para fora da cópia do produto, antes de ela existir: o que fica dentro dela
+      # entra no contexto da construção.
+      - name: guardar os scripts fora da cópia do produto
+        run: |
+          rm -rf "$RUNNER_TEMP/build-image"
+          mkdir -p "$RUNNER_TEMP/build-image"
+          mv .build-image/scripts "$RUNNER_TEMP/build-image/scripts"
+          rm -rf .build-image
+
+      # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: conferir o Dockerfile
+        env:
+          DOCKERFILE_PATH: ${{ steps.inputs.outputs.dockerfile }}
+        run: |
+          "$RUNNER_TEMP/build-image/scripts/check-dockerfile.sh" "$DOCKERFILE_PATH"
+
+      - name: construir
+        env:
+          DOCKERFILE_PATH: ${{ steps.inputs.outputs.dockerfile }}
+        run: |
+          args=()
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            args+=(--build-arg "$line")
+          done <<<"$BUILD_ARGS"
+          docker build --pull \
+            -f "$DOCKERFILE_PATH" \
+            "${args[@]}" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            -t "$IMAGE:$TAG" \
+            "$CONTEXT"
+
+      - name: conferir a imagem
+        run: |
+          "$RUNNER_TEMP/build-image/scripts/check-image.sh" "$(docker inspect --format '{{.Config.User}}' "$IMAGE:$TAG")"
+
+      # Falha em vulnerabilidade crítica que já tem correção publicada.
+      - name: varrer
+        run: |
+          "$RUNNER_TEMP/build-image/scripts/install-grype.sh" "$RUNNER_TEMP/build-image/bin"
+          "$RUNNER_TEMP/build-image/bin/grype" "docker:$IMAGE:$TAG" --fail-on critical --only-fixed
+
+      - name: entrar no registro
+        if: inputs.push
+        env:
+          TOKEN: ${{ github.token }}
+          REGISTRY: ${{ steps.inputs.outputs.registry }}
+        run: printf '%s' "$TOKEN" | docker login "$REGISTRY" -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: publicar
+        id: push
+        if: inputs.push
+        run: |
+          docker push "$IMAGE:$TAG"
+          digest="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE:$TAG" | grep -F "$IMAGE@" | head -n 1)"
+          digest="${digest##*@}"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::não foi possível ler o digest publicado"; exit 1; }
+          echo "digest=$digest" >>"$GITHUB_OUTPUT"
+          echo "Publicada: $IMAGE@$digest" >>"$GITHUB_STEP_SUMMARY"
+
+      # O runner pode ser persistente: a credencial não fica no disco dele.
+      - name: sair do registro
+        if: always() && inputs.push
+        env:
+          REGISTRY: ${{ steps.inputs.outputs.registry }}
+        run: docker logout "$REGISTRY"
+
+      - name: conferir o destino do pedido
+        id: state
+        if: inputs.push && inputs.deploy
+        run: |
+          [[ "$STATE_REPOSITORY" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*/[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || { echo "::error::state_repository inválido: <dono>/<nome>"; exit 2; }
+          {
+            echo "owner=${STATE_REPOSITORY%%/*}"
+            echo "name=${STATE_REPOSITORY##*/}"
+          } >>"$GITHUB_OUTPUT"
+
+      # O token do aplicativo só dispara workflow, e só no repositório de estado.
+      # v3.4.0
+      - uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc
+        id: app
+        if: inputs.push && inputs.deploy
+        with:
+          client-id: ${{ inputs.deploy_request_app_client_id }}
+          private-key: ${{ secrets.deploy_request_app_private_key }}
+          owner: ${{ steps.state.outputs.owner }}
+          repositories: ${{ steps.state.outputs.name }}
+          permission-actions: write
+
+      - name: pedir a implantação
+        if: inputs.push && inputs.deploy
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          WAIT: ${{ inputs.wait }}
+        run: |
+          "$RUNNER_TEMP/build-image/scripts/request-deploy.sh" \
+            "$STATE_REPOSITORY" "$SERVICE" "$ENVIRONMENT" "$DIGEST" "$GITHUB_REPOSITORY@$GITHUB_SHA" "$WAIT"

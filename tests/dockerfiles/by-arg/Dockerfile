@@ -1,0 +1,2 @@
+ARG BASE=busybox:1.37
+FROM ${BASE}
