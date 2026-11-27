@@ -31,9 +31,16 @@ url="$prev"
 case "$url" in
   */dispatches)
     printf '%s\n' "$@" >"$FIXTURES/dispatch-args"
+    # Com o arquivo dispatch-fail, o pedido é recusado, como num 401 ou num 404.
+    [ -f "$FIXTURES/dispatch-fail" ] && exit 22
     cat "$FIXTURES/dispatch"
     ;;
   */actions/runs/*)
+    # Com o arquivo slow, cada consulta demora dois segundos de verdade e é contada.
+    if [ -f "$FIXTURES/slow" ]; then
+      echo x >>"$FIXTURES/calls"
+      /bin/sleep 2
+    fi
     head -n 1 "$FIXTURES/runs"
     if [ "$(wc -l <"$FIXTURES/runs")" -gt 1 ]; then
       tail -n +2 "$FIXTURES/runs" >"$FIXTURES/runs.next" && mv "$FIXTURES/runs.next" "$FIXTURES/runs"
@@ -78,6 +85,15 @@ expect 0 "FROM de um estágio anterior, com --platform e em minúsculas" "$check
 expect 0 "FROM scratch" "$check_dockerfile" "$root/tests/dockerfiles/scratch/Dockerfile"
 expect 1 "FROM por argumento" "$check_dockerfile" "$root/tests/dockerfiles/by-arg/Dockerfile"
 expect 2 "arquivo que não existe" "$check_dockerfile" "$root/tests/dockerfiles/none/Dockerfile"
+# O Docker junta as linhas terminadas em barra antes de ler a instrução.
+expect 1 "FROM continuado na linha seguinte" "$check_dockerfile" "$root/tests/dockerfiles/continued/Dockerfile"
+expect 1 "FROM partido no meio da palavra" "$check_dockerfile" "$root/tests/dockerfiles/split-keyword/Dockerfile"
+# Uma imagem também entra por COPY --from, por RUN --mount=from e pela linha syntax.
+expect 1 "COPY --from de imagem por etiqueta" "$check_dockerfile" "$root/tests/dockerfiles/copy-from/Dockerfile"
+expect 0 "COPY --from de estágio, de índice e de imagem por digest" "$check_dockerfile" "$root/tests/dockerfiles/copy-from-stage/Dockerfile"
+expect 1 "RUN --mount com from de imagem por etiqueta" "$check_dockerfile" "$root/tests/dockerfiles/mount-from/Dockerfile"
+expect 1 "linha syntax por etiqueta" "$check_dockerfile" "$root/tests/dockerfiles/syntax/Dockerfile"
+expect 0 "linha syntax por digest" "$check_dockerfile" "$root/tests/dockerfiles/syntax-pinned/Dockerfile"
 
 echo "== check-image"
 expect 0 "usuário 65532:65532" "$check_image" "65532:65532"
@@ -111,6 +127,10 @@ for piece in '"ref":"main"' '"return_run_details":true' '"service":"example"' '"
     failures=$((failures + 1))
   fi
 done
+if ! grep -q '^@/' <<<"$body"; then
+  echo "FALHOU: o pedido não leva o cabeçalho de autorização por descritor de arquivo"
+  failures=$((failures + 1))
+fi
 if grep -q fake "$tmp/log" || grep -q fake <<<"$body"; then
   echo "FALHOU: o token apareceu na saída ou nos argumentos do curl"
   failures=$((failures + 1))
@@ -129,7 +149,27 @@ expect 1 "a execução é cancelada" "$request_deploy" example-org/state example
 fixtures
 echo '{"workflow_run_id":42}' >"$tmp/fixtures/dispatch"
 run in_progress null >"$tmp/fixtures/runs"
-expect 3 "a execução não termina até o prazo" env REQUEST_DEPLOY_DEADLINE_SECONDS=30 "$request_deploy" example-org/state example stg "$digest" "$revision" true
+expect 3 "a execução não termina até o prazo" env REQUEST_DEPLOY_DEADLINE_SECONDS=1 "$request_deploy" example-org/state example stg "$digest" "$revision" true
+
+# O prazo é de relógio: o tempo das consultas conta. Cada consulta leva dois
+# segundos; com prazo de dois, só cabe uma.
+fixtures
+echo '{"workflow_run_id":42}' >"$tmp/fixtures/dispatch"
+run in_progress null >"$tmp/fixtures/runs"
+touch "$tmp/fixtures/slow"
+expect 3 "prazo com a API lenta" env REQUEST_DEPLOY_DEADLINE_SECONDS=2 REQUEST_DEPLOY_POLL_SECONDS=1 "$request_deploy" example-org/state example stg "$digest" "$revision" true
+calls="$(wc -l <"$tmp/fixtures/calls" | tr -d ' ')"
+if [ "$calls" -le 1 ]; then
+  echo "ok: a API lenta não estica o prazo ($calls consulta)"
+else
+  echo "FALHOU: a API lenta esticou o prazo ($calls consultas, esperado 1)"
+  failures=$((failures + 1))
+fi
+
+fixtures
+echo '{}' >"$tmp/fixtures/dispatch"
+touch "$tmp/fixtures/dispatch-fail"
+expect 1 "o pedido é recusado pela API" "$request_deploy" example-org/state example stg "$digest" "$revision" true
 
 fixtures
 echo '{}' >"$tmp/fixtures/dispatch"
