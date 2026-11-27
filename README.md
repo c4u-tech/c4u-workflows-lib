@@ -8,7 +8,7 @@ repositório de estado.
 
 | Passo | O que faz |
 | :--- | :--- |
-| Conferir o Dockerfile | Toda imagem de base vem por digest (`@sha256:`) |
+| Conferir o Dockerfile | Toda imagem trazida de um registro vem por digest (`@sha256:`): em `FROM`, em `COPY --from`, em `RUN --mount` e na linha `# syntax=` |
 | Construir | `docker build`, com os argumentos de quem chama. O commit de origem é gravado na etiqueta `org.opencontainers.image.revision` pelo workflow: o Dockerfile não precisa colaborar |
 | Conferir a imagem | O usuário declarado é um número, e não é zero |
 | Varrer | Vulnerabilidades conhecidas, com o grype baixado por soma fixada. Falha em vulnerabilidade crítica que já tem correção |
@@ -18,7 +18,8 @@ repositório de estado.
 
 ## O que ele recusa
 
-- Imagem de base sem digest, inclusive a que vem por argumento (`FROM ${BASE}`).
+- Imagem sem digest, inclusive a que vem por argumento (`FROM ${BASE}`), por
+  `COPY --from`, por `RUN --mount` ou pela linha `# syntax=`.
 - Imagem sem `USER`, com `USER 0` ou com usuário por nome (`USER nonroot`).
 - Vulnerabilidade crítica com correção publicada.
 - Entrada fora do formato: nome de imagem, marca, argumento de construção, serviço,
@@ -93,7 +94,9 @@ repositório e a essa permissão: dispara workflow, e não lê nem escreve conte
 
 ### O que o runner precisa ter
 
-`docker`, `git`, `curl`, `node`, `tar` e `sha256sum`. Os runners do GitHub têm todos.
+Linux em `amd64`, com `docker`, `git`, `curl`, `node`, `tar` e `sha256sum`. Os runners
+do GitHub têm todos. A varredura usa um pacote fixado por soma, que só existe aqui
+para `amd64`: noutra arquitetura o passo recusa, com o motivo.
 
 ## Desenvolver
 

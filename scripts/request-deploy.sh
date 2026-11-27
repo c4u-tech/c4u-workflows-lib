@@ -32,7 +32,7 @@ deadline="${REQUEST_DEPLOY_DEADLINE_SECONDS:-2400}"
 poll="${REQUEST_DEPLOY_POLL_SECONDS:-10}"
 
 call() {
-  curl -fsS \
+  curl -fsS --max-time 30 \
     -H @<(printf 'Authorization: Bearer %s' "${GH_TOKEN:?request-deploy.sh: falta GH_TOKEN}") \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
@@ -56,7 +56,10 @@ note() {
 
 body="$(printf '{"ref":"main","return_run_details":true,"inputs":{"service":"%s","env":"%s","digest":"%s","source_revision":"%s"}}' \
   "$service" "$environment" "$digest" "$revision")"
-response="$(call -X POST -d "$body" "$api/repos/$repo/actions/workflows/deploy.yml/dispatches")"
+if ! response="$(call -X POST -d "$body" "$api/repos/$repo/actions/workflows/deploy.yml/dispatches")"; then
+  echo "request-deploy.sh: a API recusou o pedido de implantação" >&2
+  exit 1
+fi
 run_id="$(field workflow_run_id <<<"$response")"
 if ! [[ "$run_id" =~ ^[0-9]+$ ]]; then
   echo "request-deploy.sh: o pedido foi aceito, mas a resposta não trouxe a execução" >&2
@@ -67,8 +70,10 @@ note "Implantação pedida: $url"
 
 [ "$wait" = true ] || exit 0
 
-elapsed=0
-while [ "$elapsed" -lt "$deadline" ]; do
+# O prazo é de relógio: o tempo das consultas conta, e não só o das pausas. SECONDS
+# é o relógio do próprio bash, contado desde aqui.
+SECONDS=0
+while :; do
   run="$(call "$api/repos/$repo/actions/runs/$run_id" 2>/dev/null || true)"
   if [ "$(field status <<<"$run")" = completed ]; then
     conclusion="$(field conclusion <<<"$run")"
@@ -79,8 +84,9 @@ while [ "$elapsed" -lt "$deadline" ]; do
     note "A implantação terminou em ${conclusion:-(sem resultado)}: $url"
     exit 1
   fi
-  sleep "$poll"
-  elapsed=$((elapsed + poll))
+  remaining=$((deadline - SECONDS))
+  [ "$remaining" -gt 0 ] || break
+  sleep "$((poll < remaining ? poll : remaining))"
 done
 note "A implantação não terminou em $deadline segundos: $url"
 exit 3
